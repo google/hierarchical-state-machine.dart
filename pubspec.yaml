@@ -15,9 +15,11 @@
 name: hierarchical_state_machine
 description: >-
   A framework for building state machines similar to UML statecharts. States
-  are oranized in parent/child relationships, allowing common event
+  are organized in parent/child relationships, allowing common event
   handling to be performed by more generic, containing states.
+repository: https://github.com/google/hierarchical-state-machine.dart
 version: 0.0.1
+
 homepage: https://github.com/google/hierarchical-state-machine.dart
 
 environment:

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 /// A hierarchical state machine (HSM) implementation for dart.
+library;
+
 import 'dart:async';
 import 'dart:collection';
 
@@ -507,8 +509,7 @@ class State<S, E> {
 /// States can handle events by registering [EventHandler] via the [addHandler]
 /// and [addHandlers] methods. See EventHandler for more information.
 class ParallelState<S, E> extends State<S, E> {
-  ParallelState(S id, {State<S, E>? parent, Logger? log})
-      : super(id, parent: parent, log: log);
+  ParallelState(super.id, {super.parent, super.log});
 
   /// All children are always active.
   @override

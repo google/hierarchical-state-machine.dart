@@ -17,7 +17,7 @@ description: >-
   A framework for building state machines similar to UML state charts. States
   are organized in parent/child relationships, allowing common event
   handling to be performed by more generic, containing states.
-rersion: 1.0.0
+version: 1.0.0
 homepage: https://github.com/jtmcdole/hierarchical-state-machine.dart
 
 environment:

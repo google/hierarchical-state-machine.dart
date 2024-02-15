@@ -24,3 +24,26 @@ The most important information can be found in the `EventHandler` class:
 /// └───────────────────────────────────────────────────────┘
 ```
 
+## What about...
+
+### Fork / Join pseudo states
+
+Concurent states already exist as `ParallelState`. Its not perfect semantic,
+but you can implement this in your own machine.
+
+### History and Deep History
+
+The initial state is mutable and evaluated after `onEnter` of the target state.
+Not perfectly semantic, but very workable in your own machine.
+
+### Conditionals
+
+Event handlers have guards and these can be used to make the choice of which
+target is transitioned to on a given event.
+
+### Event Deferral
+
+Simple deferrals can be done locally by capturing events and replaying them
+on exit. While not perfect, it does let the future state define its own
+deferal list to re-capture the events.
+

@@ -1,11 +1,89 @@
-# Hierarchical State Machine
+# Hierarchical State Machine (HSM)
 
-This hierarchial state machine (HSM) resembles a UML statechart, written in
-dart. States are oranized in parent/child relationships, allowing common event
-handling to be performed by more generic, containing states. This machine also
-supports parallel or "Orthogonal regions".
+[![Pub Version](https://img.shields.io/pub/v/hierarchical_state_machine)](https://pub.dev/packages/hierarchical_state_machine)
 
-The most important information can be found in the `EventHandler` class:
+Industrial-grade Statecharts for Dart. A type-safe, hierarchical state machine implementation following Precise Semantics (PSSM) principles.
+
+## Why HSM?
+
+Flat state machines lead to "state explosion." HSMs solve this through _hierarchy_:
+
+- **Inheritance**: A `LoggedOut` state can handle a `Login` event, while its children (`Prompting`, `Authenticating`) focus only on their specific logic.
+- **Composition**: Group related states into logical units.
+- **Concurrency**: Multiple states can act serially or in parallel depending on the regions.
+
+## Core Concepts
+
+### 1. The Blueprint (Static Definition)
+
+Define your logic once using a declarative, tree-like structure. Blueprints are immutable and validated during compilation.
+
+### 2. The Machine (Runtime Instance)
+
+Compile a Blueprint into a Machine instance. This separates your "business rules" from the "current state," allowing you to run multiple instances of the same logic simultaneously. You can share blueprints between machines (e.g. `Authentication`) if you share events.
+
+## Quick Start
+
+```dart
+enum States { root, locked, unlocked, blinking }
+enum Events { coin, push, timer }
+
+final blueprint = MachineBlueprint<States, Events>(
+  name: 'Turnstile',
+  root: .composite(
+    id: .root,
+    initial: .locked,
+    children: [
+      .composite(
+        id: .locked,
+        on: { .coin: .new(guard: (e, d) => d == 0.25, target: .unlocked) },
+      ),
+      .composite(
+        id: .unlocked,
+        on: { .push: .new(target: .locked) },
+      ),
+    ],
+  ),
+);
+
+final (hsm, errors) = blueprint.compile();
+hsm!.start();
+
+await hsm.handle(Events.coin, 0.25);
+print(hsm.stateString); // Turnstile/States.unlocked
+```
+
+## Advanced Features
+
+### Orthogonal Regions (Parallel)
+
+Run multiple states at once. The parallel state is only "complete" when all regions reach their final states, or when one state explicity exits.
+
+### History Semantics
+
+Automatically remember where you were.
+
+- **Shallow History**: Restores the immediate child.
+- **Deep History**: Restores the entire active leaf configuration from any depth.
+
+### Pseudo-states
+
+- **Choice**: Dynamic branching based on runtime guards: a many-to-many target.
+- **Fork**: Enter a parallel state at specific, non-default coordinates in different regions.
+- **Terminate**: Halt processing of the machine from anywhere.
+- **Final**: Work for the parent is complete; executes completers.
+
+### Event Deferral
+
+Capture events that cannot be handled in the current state and automatically replay them once the machine transitions to a state that can.
+
+## Documentation
+
+For a deep dive into transition segments, guard evaluations, and action execution order, see the [API Documentation](https://pub.dev/documentation/hierarchical_state_machine/latest/).
+
+## Order of Execution
+
+When an event is "handled" by a state; the order of operations is defined by PSSM. The following is a brief overview.
 
 ```dart
 /// Order of operations for the following state, assuming event T1 is fired and
@@ -24,26 +102,6 @@ The most important information can be found in the `EventHandler` class:
 /// └───────────────────────────────────────────────────────┘
 ```
 
-## What about...
+## Future Work
 
-### Fork / Join pseudo states
-
-Concurent states already exist as `ParallelState`. Its not perfect semantic,
-but you can implement this in your own machine.
-
-### History and Deep History
-
-The initial state is mutable and evaluated after `onEnter` of the target state.
-Not perfectly semantic, but very workable in your own machine.
-
-### Conditionals
-
-Event handlers have guards and these can be used to make the choice of which
-target is transitioned to on a given event.
-
-### Event Deferral
-
-Simple deferrals can be done locally by capturing events and replaying them
-on exit. While not perfect, it does let the future state define its own
-deferal list to re-capture the events.
-
+- **Serialization**: we plan to save the state of the machine and restore it at a later time.

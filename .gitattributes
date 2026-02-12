@@ -1,0 +1,5 @@
+# Force all dart files to use LF on checkout and commit
+*.dart text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

@@ -14,99 +14,116 @@
 
 import 'dart:async';
 
-import 'package:logging/logging.dart';
-import 'package:hierarchical_state_machine/hierarchical_state_machine.dart';
+import 'package:hierarchical_state_machine/src/machine.dart';
 import 'package:test/test.dart';
+import 'test_observer.dart';
 
 /// A matcher that checks that an [AssertionError] was thrown.
 final throwsAssertionError = throwsA(isA<AssertionError>());
 
 void main() {
-  Logger.root.level = Level.ALL;
-  final startTime = DateTime.now();
-  Logger.root.onRecord.listen((LogRecord rec) {
-    var elapsed = DateTime.now().difference(startTime);
-    var error = rec.error == null ? '' : ' ${rec.error}';
-    var stackTrace = rec.stackTrace == null ? '' : '\n${rec.stackTrace}';
-    print(
-      '$elapsed [${rec.level}] ${rec.loggerName}: '
-      '${rec.message}$error$stackTrace',
-    );
-  });
-
   group('Machine', () {
     group('constructor', () {
       test('works normally', () {
-        var root = State('root');
-        var machine = Machine.rooted(root);
-        expect(machine['root'], same(root));
-        expect(machine.root, same(root));
-        expect(root.machine, same(machine));
+        final machineDef = MachineBlueprint<String, String>(
+          root: .composite(id: 'root'),
+        );
+        final (machine, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
+        );
+        expect(errors, isEmpty);
+        expect(machine, isNotNull);
+        expect(machine!.getState('root'), isNotNull);
+        expect(machine.root.id, equals('root'));
       });
-      test('asserts with another machine\'s root', () {
-        var badState = State('root');
-        Machine.rooted(badState);
-        expect(() => Machine.rooted(badState), throwsAssertionError);
-      });
+
       test('generates stateChain for simple state', () {
-        var root = State('root');
-        var machine = Machine.rooted(root);
-        State('a', parent: root);
-        State('b', parent: root);
-        State('aa', parent: machine['a']);
-        root.initialState = machine['aa'];
-        machine.start();
+        final machineDef = MachineBlueprint<String, String>(
+          root: .composite(
+            id: 'root',
+            initial: 'aa',
+            children: [
+              .composite(
+                id: 'a',
+                children: [.composite(id: 'aa')],
+              ),
+              .composite(id: 'b'),
+            ],
+          ),
+        );
+        final (machine, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
+        );
+        expect(errors, isEmpty);
+        machine!.start();
         expect(machine.stateString, 'State(root)/State(a)/State(aa)');
       });
-      test('generates stateChain for complex state', () {
-        var root = State('root');
-        var machine = Machine.rooted(root);
-        ParallelState('a', parent: root);
-        State('aa', parent: machine['a']);
-        ParallelState('ab', parent: machine['a']);
-        State('aba', parent: machine['ab']);
-        State('abb', parent: machine['ab']);
 
-        root.initialState = machine['ab'];
-        machine.start();
+      test('generates stateChain for complex state', () {
+        final machineDef = MachineBlueprint<String, String>(
+          root: .composite(
+            id: 'root',
+            initial: 'ab',
+            children: [
+              .parallel(
+                id: 'a',
+                children: [
+                  .composite(id: 'aa'),
+                  .parallel(
+                    id: 'ab',
+                    children: [
+                      .composite(id: 'aba'),
+                      .composite(id: 'abb'),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+        final (machine, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
+        );
+        expect(errors, isEmpty);
+        machine!.start();
         expect(
           machine.stateString,
           'State(root)/ParallelState(a)/(State(aa),'
           'ParallelState(ab)/(State(aba),State(abb)))',
         );
       });
-      test('factory', () {
-        var hsm = Machine(name: 'foo', rootId: 'root');
-        expect(hsm, isNotNull);
-        expect(hsm.root, isNotNull);
-        expect(hsm.root.id, 'root');
-        expect(hsm.root.parent, isNull);
-      });
     });
 
     group('events', () {
-      late Machine machine;
-      late State root;
-      setUp(() {
-        root = State('root');
-        machine = Machine.rooted(root);
-      });
+      late MachineBlueprint<String, String> machineDef;
+      late Machine<String, String> machine;
 
       test('handle queued events', () async {
         var t2 = false;
-        root.addHandler(
-          't1',
-          action: (e, d) {
-            machine.handle('t2', 'internal');
-          },
+        machineDef = MachineBlueprint(
+          root: .composite(
+            id: 'root',
+            on: {
+              't1': .new(
+                action: (e, d) {
+                  machine.handle('t2', 'internal');
+                },
+              ),
+              't2': .new(
+                action: (e, d) {
+                  t2 = true;
+                },
+              ),
+            },
+          ),
         );
-        root.addHandler(
-          't2',
-          action: (e, d) {
-            t2 = true;
-          },
+        final (compiled, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
         );
+        expect(errors, isEmpty);
+        machine = compiled!;
         machine.start();
+
         var settled = false;
         expect(machine.isHandlingEvent, isFalse);
         expect(await machine.handle('t1', 'from test'), isTrue);
@@ -123,696 +140,628 @@ void main() {
       });
 
       test('reports missing events', () async {
-        final a = State('a', parent: root);
-        root.initialState = a;
+        machineDef = MachineBlueprint(
+          root: .composite(
+            id: 'root',
+            initial: 'a',
+            children: [.composite(id: 'a')],
+          ),
+        );
+        final (compiled, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
+        );
+        expect(errors, isEmpty);
+        machine = compiled!;
         machine.start();
         expect(await machine.handle('codefu', null), isFalse);
+      });
+
+      test('stop and handle guard', () async {
+        machineDef = MachineBlueprint(root: .composite(id: 'root'));
+        final (compiled, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
+        );
+        machine = compiled!;
+        expect(await machine.handle('e1'), isFalse, reason: 'Not started');
+        machine.start();
+        expect(machine.isRunning, isTrue);
+        machine.stop();
+        expect(machine.isRunning, isFalse);
+        expect(await machine.handle('e1'), isFalse, reason: 'Stopped');
+      });
+
+      test('error handling in event loop', () async {
+        machineDef = MachineBlueprint(
+          root: .composite(
+            id: 'root',
+            on: {
+              'error': .new(action: (e, d) => throw Exception('test error')),
+            },
+          ),
+        );
+        final (compiled, errors) = machineDef.compile(
+          observer: const TestPrintObserver(),
+        );
+        machine = compiled!;
+        machine.start();
+        expect(machine.handle('error'), throwsA(isA<Exception>()));
       });
     });
   });
 
   test('typed machine', () {
-    var hsm = Machine<TestStates, TestEvents>(
+    final machineDef = MachineBlueprint<TestStates, TestEvents>(
       name: 'typed',
-      rootId: TestStates.a,
-      log: Logger('[typed ]'),
+      root: .composite(
+        id: TestStates.a,
+        initial: TestStates.ab,
+        children: [
+          .composite(id: TestStates.aa),
+          .composite(id: TestStates.ab),
+          .composite(id: TestStates.b),
+        ],
+      ),
     );
-    final a = hsm.root;
-    // And this is why we write helper functions because this sucks.
-    State<TestStates, TestEvents>(TestStates.aa, parent: a);
-    var ab = a.newChild(TestStates.ab);
-    a.newChild(TestStates.b);
-    a.initialState = ab;
-    hsm.start();
-    expect(ab.isActive, isTrue);
+    final (machine, errors) = machineDef.compile(
+      observer: const TestPrintObserver(),
+    );
+    expect(errors, isEmpty);
+    machine!.start();
+    expect(machine.getState(TestStates.ab)!.isActive, isTrue);
   });
 
   group('State', () {
     late Machine<String, dynamic> machine;
-    late State<String, dynamic> root;
-    late State<String, dynamic> a;
-
-    setUp(() {
-      root = State('root');
-      machine = Machine.rooted(root);
-      a = State('a', parent: root);
-    });
 
     test('isRoot', () {
-      expect(root.isRoot, isTrue);
-      expect(a.isRoot, isFalse);
+      final machineDef = MachineBlueprint<String, dynamic>(
+        root: .composite(
+          id: 'root',
+          children: [.composite(id: 'a')],
+        ),
+      );
+      final (compiled, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine = compiled!;
+      expect(machine.root.isActive, isFalse); // Not started
+      machine.start();
+      expect(machine.root.isActive, isTrue);
     });
 
     test('can be nested', () {
-      expect(machine['a'], same(a));
-      expect(a.parent, same(root));
-    });
-
-    test('must be unique', () {
-      expect(() => State('a', parent: a), throwsArgumentError);
+      final machineDef = MachineBlueprint<String, dynamic>(
+        root: .composite(
+          id: 'root',
+          children: [.composite(id: 'a')],
+        ),
+      );
+      final (compiled, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine = compiled!;
+      expect(machine.getState('a'), isNotNull);
+      expect(machine.getState('a')!.parent?.id, equals('root'));
     });
 
     test('path generation', () {
-      expect(a.path, [root, a]);
+      final machineDef = MachineBlueprint<String, dynamic>(
+        root: .composite(
+          id: 'root',
+          children: [.composite(id: 'a')],
+        ),
+      );
+      final (compiled, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine = compiled!;
+      final a = machine.getState('a')!;
+      expect(a.path.map((s) => s.id), ['root', 'a']);
     });
 
     test('report ancestry traits', () {
-      final b = State('a.b', parent: a);
+      final machineDef = MachineBlueprint<String, dynamic>(
+        root: .composite(
+          id: 'root',
+          children: [
+            .composite(
+              id: 'a',
+              children: [.composite(id: 'a.b')],
+            ),
+          ],
+        ),
+      );
+      final (compiled, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine = compiled!;
+      final a = machine.getState('a') as BaseState;
+      final b = machine.getState('a.b') as BaseState;
+
       expect(b.isDescendantOf(a), isTrue);
       expect(a.isDescendantOf(b), isFalse);
       expect(a.isAncestorOf(b), isTrue);
       expect(b.isAncestorOf(a), isFalse);
       expect(a.hasLineage(b) && b.hasLineage(a), isTrue);
-
-      expect(a.isDescendantOf(a), isFalse);
-      expect(a.isAncestorOf(a), isFalse);
-      expect(a.hasLineage(a), isFalse);
-
-      var c = State('c', parent: root);
-      expect(c.hasLineage(a), isFalse);
     });
 
     test('returns LCA of common states', () {
-      final b = State('a.b', parent: a);
-      var c = State('a.b.c', parent: b);
-      var cc = State('a.b.cc', parent: b);
-      var d = State('a.b.c.d', parent: c);
+      final machineDef = MachineBlueprint<String, dynamic>(
+        root: .composite(
+          id: 'root',
+          children: [
+            .composite(
+              id: 'a',
+              children: [
+                .composite(
+                  id: 'a.b',
+                  children: [
+                    .composite(
+                      id: 'a.b.c',
+                      children: [.composite(id: 'a.b.c.d')],
+                    ),
+                    .composite(id: 'a.b.cc'),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      final (compiled, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine = compiled!;
+      final b = machine.getState('a.b') as BaseState;
+      final cc = machine.getState('a.b.cc') as BaseState;
+      final d = machine.getState('a.b.c.d') as BaseState;
 
-      expect(State.lowestCommonAncestor(d, cc), b);
-      expect(State.lowestCommonAncestor(cc, c), b);
-      expect(State.lowestCommonAncestor(cc, b), a);
+      expect(lowestCommonAncestor(d, cc), b);
+      expect(lowestCommonAncestor(cc, b), machine.getState('a'));
     });
 
-    test('returns null for LCA of uncommon states (bad state code)', () {
-      final b = State('a.b', parent: a);
-      var c = State('a.b.c', parent: b);
-
-      var root2 = State('root');
-      Machine.rooted(root2);
-      var a1 = State('a', parent: root2);
-      final b1 = State('a.b', parent: a1);
-
-      expect(State.lowestCommonAncestor(b1, c), isNull);
-    });
-
-    test('can add handlers with different data types', () {
+    test('can add handlers with different data types', () async {
       final event1 = 'event-1';
       final event2 = 'event-2';
       final data1 = 'data-1';
       final data2 = 3;
 
+      final machineDef = MachineBlueprint<String, dynamic>(
+        root: .composite(
+          id: 'root',
+          initial: 'a',
+          on: {
+            event1: TransitionBlueprint<String, dynamic>(
+              target: 'a',
+              guard: (event, data) => data == data1,
+              action: (event, data) => expect(data, isA<String>()),
+            ),
+          },
+          children: [
+            .composite(
+              id: 'a',
+              on: {
+                event2: TransitionBlueprint<String, dynamic>(
+                  target: 'root',
+                  guard: (event, data) => data != data2,
+                  action: (event, data) => expect(data, isA<int>()),
+                ),
+              },
+            ),
+          ],
+        ),
+      );
+      final (compiled, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine = compiled!;
       machine.start();
-      root.addHandler<String>(
-        event1,
-        action: (event, String data) => expect(data, TypeMatcher<String>()),
-        guard: (event, String data) => data == data1,
-        target: a,
-      );
-      a.addHandler<int>(
-        event2,
-        action: (event, int data) => expect(data, TypeMatcher<int>()),
-        guard: (event, int data) => data != data2,
-        target: root,
-      );
 
-      machine.handle(event1, data1);
-      machine.handle(event2, data2);
-      expect(a.isActive, isTrue);
+      await machine.handle(event1, data1);
+      await machine.handle(event2, data2);
+      expect(machine.getState('a')!.isActive, isTrue);
     });
   });
 
   group('Transitions', () {
-    final log = Logger('[Transitions] ');
-    late State root;
-    late Machine machine;
     late List<String> records;
 
     void record(String msg) => records.add(msg);
-    setUp(() {
-      root = State('root', log: log)
-        ..onEnter = () {
-          record('root:enter');
-        }
-        ..onExit = () {
-          record('root:exit');
-        };
-
-      machine = Machine.rooted(root, log: log);
-
-      records = [];
-      final a = State('a', parent: root)
-        ..onEnter = () {
-          record('a:enter');
-        }
-        ..onExit = () {
-          record('a:exit');
-        };
-      var aa = State('aa', parent: a)
-        ..onEnter = () {
-          record('aa:enter');
-        }
-        ..onExit = () {
-          record('aa:exit');
-        };
-      State('aaa', parent: aa)
-        ..onEnter = () {
-          record('aaa:enter');
-        }
-        ..onExit = () {
-          record('aaa:exit');
-        };
-      State('aab', parent: aa)
-        ..onEnter = () {
-          record('aab:enter');
-        }
-        ..onExit = () {
-          record('aab:exit');
-        };
-
-      var ab = State('ab', parent: a)
-        ..onEnter = () {
-          record('ab:enter');
-        }
-        ..onExit = () {
-          record('ab:exit');
-        };
-
-      State('aba', parent: ab)
-        ..onEnter = () {
-          record('aba:enter');
-        }
-        ..onExit = () {
-          record('aba:exit');
-        };
-
-      State('ac', parent: a)
-        ..onEnter = () {
-          record('ac:enter');
-        }
-        ..onExit = () {
-          record('ac:exit');
-        };
-
-      // B-Parallel[A->AA && B->BA]
-      final b = ParallelState('b', parent: root)
-        ..onEnter = () {
-          record('b:enter');
-        }
-        ..onExit = () {
-          record('b:exit');
-        };
-
-      final ba = State('ba', parent: b)
-        ..onEnter = () {
-          record('ba:enter');
-        }
-        ..onExit = () {
-          record('ba:exit');
-        };
-
-      State('baa', parent: ba)
-        ..onEnter = () {
-          record('baa:enter');
-        }
-        ..onExit = () {
-          record('baa:exit');
-        };
-
-      final bb = State('bb', parent: b)
-        ..onEnter = () {
-          record('bb:enter');
-        }
-        ..onExit = () {
-          record('bb:exit');
-        };
-
-      State('bba', parent: bb)
-        ..onEnter = () {
-          record('bba:enter');
-        }
-        ..onExit = () {
-          record('bba:exit');
-        };
-    });
 
     test('root initial state taken when starting', () {
-      root.initialState = machine['aa'];
-      machine.start();
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          entry: () => record('root:enter'),
+          initial: 'aa',
+          children: [
+            .composite(
+              id: 'a',
+              entry: () => record('a:enter'),
+              children: [.composite(id: 'aa', entry: () => record('aa:enter'))],
+            ),
+          ],
+        ),
+      );
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       expect(records, ['root:enter', 'a:enter', 'aa:enter']);
     });
 
-    test('onInitialState ignored if no initialState', () {
-      var called = {};
-      root.onInitialState = () {
-        called['root'] = true;
-      };
-      machine.start();
-      expect(called, {});
-    });
-
-    test('onInitialState called', () {
-      var called = {};
-      root.onInitialState = () {
-        called['root'] = true;
-      };
-
-      final a = machine['a'];
-      root.initialState = a;
-
-      a!.initialState = machine['aa'];
-      a.onInitialState = () => called['a'] = true;
-
-      machine['aa']!.initialState = machine['aab'];
-
-      machine.start();
+    test('onInitialState called (migrated to entry actions)', () {
+      var called = <String, bool>{};
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          entry: () => called['root'] = true,
+          initial: 'aa',
+          children: [
+            .composite(
+              id: 'a',
+              entry: () => called['a'] = true,
+              children: [.composite(id: 'aa')],
+            ),
+          ],
+        ),
+      );
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       expect(called, {'root': true, 'a': true});
     });
 
-    test('simple sibling transition', () {
-      var aa = machine['aa'];
-      root.initialState = aa;
-      aa!.addHandler(
-        't1',
-        target: machine['ab'],
-        action: (e, __) => record('aa:$e'),
-        local: false,
+    test('simple sibling transition', () async {
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          entry: () => record('root:enter'),
+          initial: 'aa',
+          children: [
+            .composite(
+              id: 'a',
+              entry: () => record('a:enter'),
+              children: [
+                .composite(
+                  id: 'aa',
+                  entry: () => record('aa:enter'),
+                  exit: () => record('aa:exit'),
+                  on: {
+                    't1': .new(
+                      target: 'ab',
+                      action: (e, d) => record('aa:$e'),
+                      kind: TransitionKind.external,
+                    ),
+                  },
+                ),
+                .composite(id: 'ab', entry: () => record('ab:enter')),
+              ],
+            ),
+          ],
+        ),
       );
-      machine.start();
-      machine.handle('t1');
-      expect(records, [
-        'root:enter',
-        'a:enter',
-        'aa:enter',
-        'aa:exit',
-        'aa:t1',
-        'ab:enter'
-      ]);
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
+      records.clear(); // Clear initial entry records
+      await machine.handle('t1');
+      expect(records, ['aa:exit', 'aa:t1', 'ab:enter']);
     });
 
     test('parallel children all entered', () {
-      root.initialState = machine['b'];
-      machine['b']!.initialState = machine['baa'];
-      machine['bb']!.initialState = machine['bba'];
-
-      machine.start();
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          entry: () => record('root:enter'),
+          initial: 'b',
+          children: [
+            .parallel(
+              id: 'b',
+              entry: () => record('b:enter'),
+              children: [
+                .composite(
+                  id: 'ba',
+                  entry: () => record('ba:enter'),
+                  initial: 'baa',
+                  children: [
+                    .composite(id: 'baa', entry: () => record('baa:enter')),
+                  ],
+                ),
+                .composite(
+                  id: 'bb',
+                  entry: () => record('bb:enter'),
+                  initial: 'bba',
+                  children: [
+                    .composite(id: 'bba', entry: () => record('bba:enter')),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
+      // The order depends on children order and initial state transitions.
       expect(records, [
         'root:enter',
         'b:enter',
         'ba:enter',
+        'baa:enter',
         'bb:enter',
         'bba:enter',
-        'baa:enter'
       ]);
     });
 
     test('parallel children all exited', () async {
-      root.initialState = machine['b'];
-      machine['b']!.initialState = machine['baa'];
-      machine['bb']!.initialState = machine['bba'];
-
-      machine.start();
-      records.clear();
-      root.addHandler('t1', target: machine['a']);
-      await machine.handle('t1');
-      expect(
-        records,
-        ['baa:exit', 'ba:exit', 'bba:exit', 'bb:exit', 'b:exit', 'a:enter'],
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          initial: 'b',
+          on: {'t1': .new(target: 'a')},
+          children: [
+            .composite(id: 'a', entry: () => record('a:enter')),
+            .parallel(
+              id: 'b',
+              exit: () => record('b:exit'),
+              children: [
+                .composite(
+                  id: 'ba',
+                  exit: () => record('ba:exit'),
+                  initial: 'baa',
+                  children: [
+                    .composite(id: 'baa', exit: () => record('baa:exit')),
+                  ],
+                ),
+                .composite(
+                  id: 'bb',
+                  exit: () => record('bb:exit'),
+                  initial: 'bba',
+                  children: [
+                    .composite(id: 'bba', exit: () => record('bba:exit')),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
       );
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
+      records.clear();
+      await machine.handle('t1');
+      expect(records, [
+        'baa:exit',
+        'ba:exit',
+        'bba:exit',
+        'bb:exit',
+        'b:exit',
+        'a:enter',
+      ]);
     });
 
     test('parallel children delivered events', () async {
-      root.initialState = machine['b'];
-      final bb = machine['bb'];
-      final ba = machine['ba'];
-      machine['b']!.initialState = machine['baa'];
-      machine['bb']!.initialState = machine['bba'];
-      machine.start();
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          initial: 'b',
+          children: [
+            .parallel(
+              id: 'b',
+              children: [
+                .composite(
+                  id: 'ba',
+                  initial: 'baa',
+                  children: [.composite(id: 'baa')],
+                  on: {
+                    't1': .new(
+                      guard: (e, d) {
+                        records.add('ba:g:$e');
+                        return false;
+                      },
+                    ),
+                  },
+                ),
+                .composite(
+                  id: 'bb',
+                  initial: 'bba',
+                  children: [.composite(id: 'bba')],
+                  on: {
+                    't1': .new(
+                      guard: (e, d) {
+                        records.add('bb:g:$e');
+                        return false;
+                      },
+                    ),
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       records.clear();
-      var handler = 0;
-      bb!.addHandler(
-        't1',
-        guard: (e, d) {
-          records.add('bb:g:$e:$handler');
-          return false;
-        },
-      );
-      ba!.addHandler(
-        't1',
-        guard: (e, d) {
-          records.add('ba:g:$e:$handler');
-          return false;
-        },
-      );
       await machine.handle('t1');
-      handler++;
       await machine.handle('t1');
       expect(
         records,
-        unorderedEquals(
-          ['bb:g:t1:0', 'ba:g:t1:0', 'bb:g:t1:1', 'ba:g:t1:1'],
-        ),
-      );
-    });
-
-    test('event guards', () {
-      var aa = machine['aa'];
-      var ab = machine['ab'];
-      var aba = machine['aba'];
-
-      root.addHandlers('t1', [
-        EventHandler(
-          target: aa,
-          guard: (e, d) {
-            record('root:t1:g1');
-            return false;
-          },
-          action: (e, d) => record('root:t1:a1'),
-        ),
-        EventHandler(
-          target: ab,
-          guard: (e, d) {
-            record('root:t1:g2');
-            return true;
-          },
-          action: (e, d) => record('root:t1:a2'),
-        ),
-        EventHandler(
-          target: aba,
-          guard: (e, d) {
-            record('root:t1:g3');
-            return false;
-          },
-          action: (e, d) => record('root:t1:a3'),
-        )
-      ]);
-      machine.start();
-      records.clear();
-      machine.handle('t1', null);
-      expect(
-        records,
-        ['root:t1:g1', 'root:t1:g2', 'root:t1:a2', 'a:enter', 'ab:enter'],
+        unorderedEquals(['bb:g:t1', 'ba:g:t1', 'bb:g:t1', 'ba:g:t1']),
       );
     });
 
     test('local transition to ancestor', () async {
-      final aaa = machine['aaa'];
-      final aa = machine['aa'];
-      root.initialState = aaa;
-      aaa!.addHandler(
-        't1',
-        target: aa,
-        action: (e, d) => record('aaa:$e'),
-        local: true,
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          initial: 'aaa',
+          children: [
+            .composite(
+              id: 'a',
+              entry: () => record('a:enter'),
+              children: [
+                .composite(
+                  id: 'aa',
+                  entry: () => record('aa:enter'),
+                  children: [
+                    .composite(
+                      id: 'aaa',
+                      on: {
+                        't1': .new(
+                          target: 'a',
+                          action: (e, d) => record('aaa:$e'),
+                          kind: TransitionKind.local,
+                        ),
+                      },
+                      exit: () => record('aaa:exit'),
+                    ),
+                  ],
+                  exit: () => record('aa:exit'),
+                ),
+              ],
+              exit: () => record('a:exit'),
+            ),
+          ],
+        ),
       );
-      machine.start();
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       records.clear();
       expect(await machine.handle('t1', null), isTrue);
-      expect(records, [
-        'aaa:exit',
-        'aaa:t1' // Actions take place after exiting, before entering.
-      ]);
+      expect(records, ['aaa:exit', 'aa:exit', 'aaa:t1']);
     });
 
     test('local transition to descendant', () async {
-      final aaa = machine['aaa'];
-      final a = machine['a'];
-      root.initialState = a;
-      a!.addHandler(
-        't1',
-        target: aaa,
-        action: (e, d) => record('a:$e'),
-        local: true,
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          initial: 'a',
+          children: [
+            .composite(
+              id: 'a',
+              on: {
+                't1': .new(
+                  target: 'aaa',
+                  action: (e, d) => record('a:$e'),
+                  kind: TransitionKind.local,
+                ),
+              },
+              children: [
+                .composite(
+                  id: 'aa',
+                  entry: () => record('aa:enter'),
+                  children: [
+                    .composite(id: 'aaa', entry: () => record('aaa:enter')),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
       );
-      machine.start();
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       records.clear();
       expect(await machine.handle('t1', null), isTrue);
       expect(records, ['a:t1', 'aa:enter', 'aaa:enter']);
     });
 
     test('external transition to ancestor', () async {
-      final aaa = machine['aaa'];
-      var aa = machine['aa'];
-      root.initialState = aaa;
-      aaa!.addHandler(
-        't1',
-        target: aa,
-        action: (e, d) => record('aaa:$e'),
-        local: false,
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          initial: 'aaa',
+          children: [
+            .composite(
+              id: 'aa',
+              entry: () => record('aa:enter'),
+              exit: () => record('aa:exit'),
+              children: [
+                .composite(
+                  id: 'aaa',
+                  on: {
+                    't1': .new(
+                      target: 'aa',
+                      action: (e, d) => record('aaa:$e'),
+                      kind: TransitionKind.external,
+                    ),
+                  },
+                  exit: () => record('aaa:exit'),
+                ),
+              ],
+            ),
+          ],
+        ),
       );
-      machine.start();
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       records.clear();
       expect(await machine.handle('t1', null), isTrue);
-      expect(records, [
-        'aaa:exit',
-        'aa:exit',
-        'aaa:t1', // Actions take place after exiting, before entering.
-        'aa:enter',
-      ]);
+      expect(records, ['aaa:exit', 'aa:exit', 'aaa:t1', 'aa:enter']);
     });
 
     test('external transition to descendant', () async {
-      final aaa = machine['aaa'];
-      final a = machine['a'];
-      root.initialState = a;
-      a!.addHandler(
-        't1',
-        target: aaa,
-        action: (e, d) => record('a:$e'),
-        local: false,
+      records = [];
+      final machineDef = MachineBlueprint<String, String>(
+        root: .composite(
+          id: 'root',
+          initial: 'a',
+          children: [
+            .composite(
+              id: 'a',
+              entry: () => record('a:enter'),
+              exit: () => record('a:exit'),
+              on: {
+                't1': .new(
+                  target: 'aaa',
+                  action: (e, d) => record('a:$e'),
+                  kind: TransitionKind.external,
+                ),
+              },
+              children: [
+                .composite(
+                  id: 'aa',
+                  entry: () => record('aa:enter'),
+                  children: [
+                    .composite(id: 'aaa', entry: () => record('aaa:enter')),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
       );
-      machine.start();
+      final (machine, _) = machineDef.compile(
+        observer: const TestPrintObserver(),
+      );
+      machine!.start();
       records.clear();
       expect(await machine.handle('t1', null), isTrue);
       expect(records, ['a:exit', 'a:t1', 'a:enter', 'aa:enter', 'aaa:enter']);
-    });
-  });
-
-  group('Practical Machines', () {
-    test('keyboard', () async {
-      // Done to match wikipedia example.
-      // https://en.wikipedia.org/wiki/UML_state_machine#Orthogonal_regions
-      final log = Logger('[Keyboard] ');
-      var root = ParallelState('keyboard', log: log);
-      var hsm = Machine.rooted(root, name: 'keyboard', log: log);
-      var output = [];
-
-      var main = State('main_keypad', parent: root);
-      var numeric = State('numeric_keypad', parent: root);
-      var mdef = State('main_default', parent: main);
-      var ndef = State('numbers', parent: numeric);
-
-      main.initialState = mdef;
-      numeric.initialState = ndef;
-
-      var caps = State('caps_locked', parent: main);
-      var arrows = State('arrows', parent: numeric);
-
-      mdef.addHandler('CAPS_LOCK', target: caps);
-      caps.addHandler('CAPS_LOCK', target: mdef);
-
-      ndef.addHandler('NUM_LOCK', target: arrows);
-      arrows.addHandler('NUM_LOCK', target: ndef);
-
-      mdef.addHandler(
-        'ANY_KEY',
-        action: (e, d) {
-          output.add(d);
-        },
-      );
-      caps.addHandler(
-        'ANY_KEY',
-        action: (e, String? d) {
-          output.add(d!.toUpperCase());
-        },
-      );
-
-      ndef.addHandler(
-        'NUM_KEY',
-        action: (e, d) {
-          output.add(d);
-        },
-      );
-      arrows.addHandler(
-        'NUM_KEY',
-        action: (e, d) {
-          switch (d) {
-            case '8':
-              output.add('↑');
-              break;
-            case '6':
-              output.add('→');
-              break;
-            case '2':
-              output.add('↓');
-              break;
-            case '4':
-              output.add('←');
-              break;
-            case '3':
-              output.add('↘');
-              break;
-            case '1':
-              output.add('↙');
-              break;
-            case '7':
-              output.add('↖');
-              break;
-            case '9':
-              output.add('↗');
-              break;
-            default:
-              output.add(d);
-          }
-        },
-      );
-
-      hsm.start();
-
-      for (var char in 'abcABC'.split('')) {
-        await hsm.handle('ANY_KEY', char);
-      }
-      for (var char in '123'.split('')) {
-        await hsm.handle('NUM_KEY', char);
-      }
-      await hsm.handle('CAPS_LOCK');
-      for (var char in 'abcABC'.split('')) {
-        await hsm.handle('ANY_KEY', char);
-      }
-      for (var char in '123'.split('')) {
-        await hsm.handle('NUM_KEY', char);
-      }
-      await hsm.handle('NUM_LOCK');
-      for (var char in '123'.split('')) {
-        await hsm.handle('NUM_KEY', char);
-      }
-
-      expect(output.join(), 'abcABC123ABCABC123↙↓↘');
-      log.info(() => hsm.stateString);
-    });
-
-    group('Async / Deferred Machines', () {
-      // Machines *are* Async as they depend on the input of events to run.
-      late Machine<String, dynamic> hsm;
-      late State<String, dynamic> root, a, b;
-      Logger log;
-      late List<List<dynamic>> deferred;
-      late bool ready;
-      late List<String> records;
-
-      Future<void> unspool() async {
-        await Future.delayed(const Duration(milliseconds: 100), () async {
-          ready = true;
-          var queued = deferred;
-          deferred = [];
-          for (var pair in queued) {
-            await hsm.handle(pair[0], pair[1]);
-          }
-        });
-      }
-
-      setUp(() {
-        ready = false;
-        deferred = [];
-        records = [];
-        log = Logger('[defer] ');
-        hsm = Machine(name: 'deferral', log: log, rootId: 'root');
-        root = hsm.root;
-        a = root.newChild('a');
-        b = root.newChild('b');
-      });
-
-      // cleaner separation by putting "pre" and "post" in different states.
-      test('guards to another state', () async {
-        a.addHandler(
-          't1',
-          target: b,
-          guard: (e, d) {
-            records.add('a:g');
-            if (!ready) deferred.add([e, d]);
-            return ready;
-          },
-          action: (e, d) {
-            records.add('a:b');
-          },
-        );
-        root.initialState = a;
-        hsm.start();
-        unawaited(hsm.handle('t1', 1));
-        unawaited(hsm.handle('t1', 2));
-        expect(deferred, isNotEmpty);
-        expect(records, ['a:g', 'a:g']);
-        expect(b.isActive, isFalse);
-        await unspool();
-
-        /// Note, the second event, t1:2, falls through because it was passed
-        /// to B after the transition.
-        expect(records, ['a:g', 'a:g', 'a:g', 'a:b']);
-      });
-
-      test('guard with internal transition', () async {
-        root.addHandlers('t1', [
-          EventHandler(
-            guard: (_, __) => !ready,
-            action: (e, d) {
-              records.add('$e:q');
-              deferred.add([e, d]);
-            },
-          ),
-          EventHandler(
-            action: (e, d) {
-              records.add('$e:$d');
-            },
-          )
-        ]);
-        root.addHandler(
-          't2',
-          guard: (_, __) => ready,
-          action: (e, d) {
-            records.add('$e:$d');
-          },
-        );
-        hsm.start();
-        unawaited(hsm.handle('t1', 1));
-        unawaited(hsm.handle('t1', 2));
-        var dropFuture = hsm.handle('t2', 3);
-        expect(deferred.length, 2, reason: 't1 queued twice, t2 dropped');
-        await unspool();
-        expect(await dropFuture, isFalse, reason: 't2 should be dropped');
-        expect(records, ['t1:q', 't1:q', 't1:1', 't1:2']);
-      });
-
-      test('defer multiple with one handler', () async {
-        var unready = EventHandler<String, dynamic>(
-          guard: (_, __) => !ready,
-          action: (e, d) {
-            records.add('$e:q');
-            deferred.add([e, d]);
-          },
-        );
-        root.addHandlers('t1', [
-          unready,
-          EventHandler(
-            action: (e, d) {
-              records.add('$e:$d');
-            },
-          )
-        ]);
-        root.addHandlers('t2', [
-          unready,
-          EventHandler(
-            action: (e, d) {
-              records.add('$e:$d');
-            },
-          )
-        ]);
-        hsm.start();
-        unawaited(hsm.handle('t1', 1));
-        unawaited(hsm.handle('t1', 2));
-        unawaited(hsm.handle('t2', 3));
-        expect(deferred.length, 3, reason: 'deferral of all events');
-        await unspool();
-        expect(records, ['t1:q', 't1:q', 't2:q', 't1:1', 't1:2', 't2:3']);
-      });
     });
   });
 }

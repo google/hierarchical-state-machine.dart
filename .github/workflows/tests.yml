@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  # Job 1: Run logic tests
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dart
+        uses: dart-lang/setup-dart@v1
+      - name: Install Dependencies
+        run: dart pub get
+      - name: Run All Tests
+        run: dart test
+
+  # Job 2: Check API surface (Your existing job)
+  check-api:
+    needs: run-tests # Only run API check if tests pass
+    runs-on: ubuntu-latest
+    outputs:
+      api_changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Dependencies
+        run: dart pub get
+
+      - name: Generate Current API
+        run: dart run tools/list_api.dart lib/hierarchical_state_machine.dart current_api.md
+
+      - name: Compare with Source of Truth
+        id: compare
+        run: |
+          if ! diff -u docs/api_surface.md current_api.md > api_diff.diff; then
+            echo "::error::API Surface has changed. Please update docs/api_surface.md"
+            echo "::error::API dart run tools/list_api.dart lib/hierarchical_state_machine.dart current_api.md"
+            cat api_diff.diff
+            exit 1 # This will fail the job
+          fi
+
+      - name: Show Diff Locally
+        if: steps.compare.outputs.changed == 'true'
+        run: cat api_diff.txt
+
+      - name: Post Warning to PR
+        if: steps.compare.outputs.changed == 'true' && github.event_name == 'pull_request'
+        uses: mshick/add-pr-comment@v2
+        with:
+          repo-name: ${{ github.repository }} # Explicitly pass the repo name
+          refresh-message: true
+          message: |
+            ⚠️ **Public API Changes Detected!**
+            ```diff
+            $(cat api_diff.txt)
+            ```

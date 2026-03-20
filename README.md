@@ -1,5 +1,7 @@
 # Hierarchical State Machine (HSM)
 
+ARCHIVED - Maintained here: https://github.com/jtmcdole/hierarchical-state-machine.dart
+
 [![Pub Version](https://img.shields.io/pub/v/hierarchical_state_machine)](https://pub.dev/packages/hierarchical_state_machine)
 
 Industrial-grade Statecharts for Dart. A type-safe, hierarchical state machine implementation following Precise Semantics (PSSM) principles.
